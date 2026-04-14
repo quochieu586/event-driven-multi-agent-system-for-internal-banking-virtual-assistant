@@ -8,3 +8,9 @@ __pycache__
 # CDK asset staging directory
 .cdk.staging
 cdk.out
+
+# credentials file created by CDK CLI
+agents/wif_credentials.json
+
+# DS_Store files created by macOS
+.DS_Store

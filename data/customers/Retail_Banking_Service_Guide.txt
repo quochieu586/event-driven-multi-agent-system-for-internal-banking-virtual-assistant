@@ -1,0 +1,17 @@
+# RETAIL CUSTOMER SERVICE EXPERT GUIDE
+Department: Retail Customer Relations
+
+## 1. Customer Tiers
+- STANDARD: Balance under $5,000. Basic support via chatbot and email.
+- GOLD: Balance $5,000 - $50,000. Priority phone support, waived ATM fees.
+- PLATINUM: Balance over $50,000. Dedicated relationship manager, 0.5% bonus interest on savings.
+
+## 2. Common Retail Procedures
+### Lost or Stolen Cards
+If a retail customer reports a lost card, the agent must:
+1. Verify identity using the 3-step biometric check.
+2. Immediately 'Freeze' the card in the Core Banking System.
+3. Offer a digital replacement card (active in 5 minutes) and a physical card (delivery in 3-5 days).
+
+### Address Changes
+Retail customers can change their primary residence via the mobile app. For international moves, customers must provide a 'Proof of Residency' document and a 'Tax Identification Number' for the new country.

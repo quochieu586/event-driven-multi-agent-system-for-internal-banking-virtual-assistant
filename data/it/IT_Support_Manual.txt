@@ -1,0 +1,22 @@
+# IT INFRASTRUCTURE & SECURITY HANDBOOK
+Department: Information Technology (IT)
+
+## 1. Hardware Provisioning
+- STANDARD LAPTOP: MacBook Air (M3 Chip, 16GB RAM) for general staff.
+- DEV STATIONS: MacBook Pro (M3 Max, 64GB RAM) for Engineering and Data Science teams.
+- REPLACEMENT CYCLE: Every 36 months or upon hardware failure.
+
+## 2. Remote Access & VPN
+- VPN CLIENT: GlobalProtect.
+- MULTI-FACTOR AUTHENTICATION (MFA): Mandatory for all logins using 'Okta Verify'.
+- SESSION TIMEOUT: VPN sessions automatically disconnect after 8 hours of inactivity.
+
+## 3. Cybersecurity Incident Response
+### Phishing Alerts
+If an employee clicks a suspicious link, the IT Agent must:
+1. Immediately revoke the user's 'Active Directory' tokens.
+2. Trigger a remote wipe of the 'browser cache' via JAMF.
+3. Schedule a mandatory 1-hour Security Awareness training for the user.
+
+## 4. Software Requests
+Software not in the 'Standard Catalog' requires a 'SOC2 Compatibility Review' before installation.

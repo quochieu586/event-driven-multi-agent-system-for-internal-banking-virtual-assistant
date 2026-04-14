@@ -1,0 +1,18 @@
+# FINANCE & TREASURY OPERATIONS GUIDE
+Version: 2026.A
+Department: Global Finance Control
+
+## 1. Corporate Credit Line (CCL)
+- SME LIMIT: Maximum $250,000. Requires 2 years of audited financial statements.
+- ENTERPRISE LIMIT: Up to $5,000,000. Requires Board approval and asset collateralization.
+- INTEREST RATES: Calculated as SOFR (Secured Overnight Financing Rate) + 2.5% margin.
+
+## 2. Employee Expense Reimbursement
+### Travel Policy
+- Flight Class: Economy for flights under 6 hours; Business for transcontinental.
+- Per Diem: $75/day for domestic; $120/day for international (excludes lodging).
+- Submission: All receipts must be uploaded to the 'Oracle-Finance' portal within 30 days of the expense.
+
+## 3. Tax & Audit Compliance
+- VAT Filing: Quarterly on the 15th of the month following the period end.
+- Audit Protocol: Any transaction over $50,000 triggers an automatic 'Level 2' compliance review by the Senior Controller.

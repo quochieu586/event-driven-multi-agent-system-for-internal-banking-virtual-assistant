@@ -1,0 +1,17 @@
+# CORPORATE BANKING PROTOCOLS
+Department: Corporate & Institutional Support
+
+## 1. Corporate Customer Segments
+- SME (Small/Medium Enterprise): Annual turnover up to $10M. 
+- MME (Mid-Market Enterprise): Annual turnover $10M - $100M.
+- GLOBAL: Annual turnover exceeding $100M.
+
+## 2. Treasury Management Services
+Our corporate department provides "Auto-Sweep" functionality for MME and Global clients. This automatically transfers excess funds from checking accounts into high-yield overnight investment vehicles at 5:00 PM EST daily.
+
+## 3. Onboarding Requirements for Corporate Entities
+To open a corporate account, the expert agent must collect:
+1. Certificate of Incorporation.
+2. Authorized Signatory List (ASL) signed by the Board Secretary.
+3. Beneficial Ownership Disclosure (identifying any individual with >25% stake).
+4. NAICS industry classification code for risk assessment.

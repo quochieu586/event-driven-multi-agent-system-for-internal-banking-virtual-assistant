@@ -3,13 +3,19 @@ import json
 import os
 import gspread
 import google.auth
+from decimal import Decimal
+
+import time
 
 # Initialize the Bedrock Agent Runtime client
 bedrock_agent_runtime = boto3.client('bedrock-agent-runtime')
 bedrock_runtime = boto3.client('bedrock-runtime')
+dynamodb = boto3.resource('dynamodb')
 
 CUSTOMER_KB_ID = os.environ.get("KNOWLEDGE_BASE_ID") # Or your hardcoded ID
 LLM_ARN = os.environ.get("LLM_ARN") # Or your hardcoded ARN
+TABLE_NAME = os.environ.get("TABLE_NAME") # Or your hardcoded table name
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID") # Or your hardcoded Spreadsheet ID
 
 PARAM_TYPE = dict[str, int | str | float | bool]
 COL_MAPPING = {         # hardcoded mapping of column names to indices (1-based for gspread)
@@ -52,8 +58,8 @@ class GSheetManager:
                 }
             }
         
-        customer_id = str(customer_id).strip().lower() if customer_id else ""
-        full_name = str(full_name).strip().lower() if full_name else ""
+        customer_id = str(customer_id).strip().lower() if customer_id else None
+        full_name = str(full_name).strip().lower() if full_name else None
 
         records = self.worksheet.get_all_records()
         results = []
@@ -65,7 +71,7 @@ class GSheetManager:
 
             # Check both customer_id and name columns
             ## for cust_name => check substring match to allow for partial name queries, but for cust_id do exact match to avoid false positives
-            if (customer_id == row_cust_id) or (full_name in row_cust_name ):
+            if (customer_id and (customer_id == row_cust_id)) or (full_name and (full_name in row_cust_name)):
                 # Filter the row to only include requested fields
                 filtered_row = {
                     "customer_id": row.get("customer_id"),
@@ -301,7 +307,6 @@ class GSheetManager:
         }
 
 
-
 def invoke_model_with_prompt(prompt: str) -> dict:
     response = bedrock_runtime.invoke_model(
         modelId=LLM_ARN, # Changed to modelId
@@ -472,149 +477,193 @@ def extract_action_details(user_query, action_code: str) -> dict:
 
     return extract_json_payload(raw_text)
 
+
 def handler(event, context):
-    query_params = event.get('queryStringParameters', {})
-    user_query = query_params.get('q', None)
-    thought_log = query_params.get('thought_log', '')
+    table = dynamodb.Table(TABLE_NAME)
+    
+    # 1. SQS sends messages in a "Records" list
+    for record in event['Records']:
+        thought_log = ""
+        # Parse the message body sent by the Supervisor
+        try:
+            body = json.loads(record['body'])
+        except Exception as e:
+            print(f"Agent Customer fails to parse the record")
+            continue
+        
+        # We need a RequestID to link the answer back to the user later
+        request_id = body.get('request_id')
+        user_query = body.get('q', None)
 
-    thought_log += "\n• Customer Agent is executing the query..."
-
-    if not user_query:
-        thought_log += "\n• Customer Agent did not receive a query."
-        return {
-            "statusCode": 400,
-            "message": "Failed: No query provided.",
-            "body": {
-                "agent": "CUSTOMER",
-                "action": "NONE",
-                "data": [],
-                "display_text": "Sorry, I can't get your question. This may be a system issue. Please try again later or contact support if the issue persists.",
-                "thought_log": thought_log
-            }
-        }
-    try:
-        thought_log += "\n• Customer Agent is determining the required action for the query..."
-        action_code = get_llm_decision(user_query)
-        thought_log += f"\n• Customer Agent determined action code: {action_code}"
-
-        details_json = {}
-        # Case database action is needed
-        if action_code in ["GET_INFO", "ADD_NEW_USER", "UPDATE_BALANCE", "UPDATE_INFO"]:
-            spreadsheet_id = "1ONF1oTXfPhY3JXVRbmvi934d2eOXeZQq3cjbx7-Rw-I"
-            manager = GSheetManager(spreadsheet_id)
-
-            thought_log += f"\n• Customer Agent is extracting details for action {action_code}..."
-            details_json = extract_action_details(user_query, action_code)
-
-            response = {}
-            if action_code == "GET_INFO":
-                thought_log += f"\n• Customer Agent is retrieving customer information..."
-                response = manager.get_customer(details_json)
-                if response['statusCode'] == 200:
-                    thought_log += f"\n• Customer Agent successfully retrieved the information."
-                else:
-                    thought_log += f"\n• Customer Agent failed to retrieve the information."
-
-            elif action_code == "ADD_NEW_USER":
-                thought_log += f"\n• Customer Agent is adding a new customer..."
-                response = manager.add_customer(details_json)
-                if response['statusCode'] == 200:
-                    thought_log += f"\n• Customer Agent successfully added the new customer."
-                else:
-                    thought_log += f"\n• Customer Agent failed to add the new customer."
-
-            elif action_code == "UPDATE_BALANCE":
-                thought_log += f"\n• Customer Agent is updating customer balance..."
-                response = manager.update_balance(details_json)
-                if response['statusCode'] == 200:
-                    thought_log += f"\n• Customer Agent successfully updated the balance."
-                else:
-                    thought_log += f"\n• Customer Agent failed to update the balance."
-
-            elif action_code == "UPDATE_INFO":
-                thought_log += f"\n• Customer Agent is updating customer information..."
-                response = manager.update_customer_info(details_json)
-                if response['statusCode'] == 200:
-                    thought_log += f"\n• Customer Agent successfully updated the information."
-                else:
-                    thought_log += f"\n• Customer Agent failed to update the information."
-
-            response['body']['thought_log'] = thought_log
-            return response
-
-        # Case impossible action
-        if action_code == "IMPOSSIBLE_ACTION":
-            return {
-                "statusCode": 400,
-                "message": "Failed: The requested action is not supported by the API.",
-                "body": {
-                    "agent": "CUSTOMER",
-                    "action": action_code,
-                    "data": [],
-                    "display_text": "The requested action is not supported by the system.",
-                    "thought_log": thought_log
-                }
-            }
-
-        # try:
-        # 2. Ask the Knowledge Base
-        # This searches S3 and uses an LLM to generate the answer
-        if action_code == "KNOWLEDGE_QUERY":
-            thought_log += f"\n• Customer Agent is retrieving relevant information..."
-            response = bedrock_agent_runtime.retrieve_and_generate(
-                input={'text': user_query},
-                retrieveAndGenerateConfiguration={
-                    'type': 'KNOWLEDGE_BASE',
-                    'knowledgeBaseConfiguration': {
-                        'knowledgeBaseId': CUSTOMER_KB_ID,
-                        'modelArn': LLM_ARN
-                    }
+        if not user_query:
+            # If for some reason we don't have a query, we should log this and skip processing
+            thought_log += f"\n• Customer Agent received a message without a query. Skipping processing."
+            table.put_item(
+                Item={
+                    'id': request_id,
+                    'agent': 'CUSTOMER',
+                    'action_code': 'GENERAL_RESPONSE',
+                    'status': 'FAILED',
+                    'error': 'No query provided in the message',
+                    'display_text': "Sorry, I can't receive your query.",
+                    'thought_log': thought_log,
+                    'ttl': int(time.time()) + 60 * 2 # Set TTL to automatically clean up after 2 minutes
                 }
             )
+            continue
+        
+        thought_log += "\n• Customer Agent is executing the query..."
 
-            output_text = response['output']['text']
-            # Extract citations so the user knows where the info came from
-            citations = response.get('citations', [])
-            thought_log += f"\n• Customer Agent finished generating answer."
+        try:
+            thought_log += "\n• Customer Agent is determining the required action for the query..."
+            action_code = get_llm_decision(user_query)
+            thought_log += f"\n• Customer Agent determined action code: {action_code}"
 
-            return {
-                'statusCode': 200,
-                'message': f'Success',
-                'body': {
-                    "agent": "CUSTOMER",
-                    "action": action_code,
-                    "data": {},
-                    "display_text": output_text,
-                    "thought_log": thought_log
+            details_json = {}
+            # Case database action is needed
+            if action_code in ["GET_INFO", "ADD_NEW_USER", "UPDATE_BALANCE", "UPDATE_INFO"]:
+                manager = GSheetManager(SPREADSHEET_ID)
+
+                thought_log += f"\n• Customer Agent is extracting details for action {action_code}..."
+                details_json = extract_action_details(user_query, action_code)
+
+                response = {}
+                if action_code == "GET_INFO":
+                    thought_log += f"\n• Customer Agent is retrieving customer information..."
+                    response = manager.get_customer(details_json)
+                    if response['statusCode'] == 200:
+                        thought_log += f"\n• Customer Agent successfully retrieved the information."
+                    else:
+                        thought_log += f"\n• Customer Agent failed to retrieve the information."
+
+                elif action_code == "ADD_NEW_USER":
+                    thought_log += f"\n• Customer Agent is adding a new customer..."
+                    response = manager.add_customer(details_json)
+                    if response['statusCode'] == 200:
+                        thought_log += f"\n• Customer Agent successfully added the new customer."
+                    else:
+                        thought_log += f"\n• Customer Agent failed to add the new customer."
+
+                elif action_code == "UPDATE_BALANCE":
+                    thought_log += f"\n• Customer Agent is updating customer balance..."
+                    response = manager.update_balance(details_json)
+                    if response['statusCode'] == 200:
+                        thought_log += f"\n• Customer Agent successfully updated the balance."
+                    else:
+                        thought_log += f"\n• Customer Agent failed to update the balance."
+
+                elif action_code == "UPDATE_INFO":
+                    thought_log += f"\n• Customer Agent is updating customer information..."
+                    response = manager.update_customer_info(details_json)
+                    if response['statusCode'] == 200:
+                        thought_log += f"\n• Customer Agent successfully updated the information."
+                    else:
+                        thought_log += f"\n• Customer Agent failed to update the information."
+
+                # Formatted response: fix the type  from DynamoDB if it exists in the data
+
+                for key, value in response['body'].items():
+                    if isinstance(value, list):
+                        for item in value:
+                            for k, v in item.items():
+                                if isinstance(v, float):
+                                    item[k] = Decimal(str(v))
+                    elif isinstance(value, float):
+                        response['body'][key] = Decimal(str(value))
+
+                table.put_item(
+                    Item={
+                        'id': request_id,
+                        'status': 'COMPLETED' if response['statusCode'] == 200 else 'FAILED',
+                        'error': None if response['statusCode'] == 200 else response.get('message', 'Unknown error'),
+                        'action_code': action_code,
+                        'agent': 'CUSTOMER',
+                        'display_text': response['body'].get('display_text', ''),
+                        'data': response['body'].get('data', []),
+                        'thought_log': thought_log,
+                        'ttl': int(time.time()) + 60 * 2 # Set TTL to automatically clean up after 2 minutes
+                    }
+                )
+                continue
+        
+            if action_code == "IMPOSSIBLE_ACTION":
+                table.put_item(
+                    Item={
+                        'id': request_id,
+                        'status': 'FAILED',
+                        'error': 'Requested action is not supported by the API',
+                        'display_text': "The requested action is not supported by the system.",
+                        'thought_log': thought_log,
+                        'action_code': action_code,
+                        'agent': 'CUSTOMER',
+                        'ttl': int(time.time()) + 60 * 2 # Set TTL to automatically clean up after 2 minutes
+                    }
+                )
+                continue
+                
+            # Case knowledge base query is needed
+            if action_code == "KNOWLEDGE_QUERY":
+                thought_log += f"\n• Customer Agent is retrieving relevant information..."
+                response = bedrock_agent_runtime.retrieve_and_generate(
+                    input={'text': user_query},
+                    retrieveAndGenerateConfiguration={
+                        'type': 'KNOWLEDGE_BASE',
+                        'knowledgeBaseConfiguration': {
+                            'knowledgeBaseId': CUSTOMER_KB_ID,
+                            'modelArn': LLM_ARN
+                        }
+                    }
+                )
+
+                output_text = response['output']['text']
+                # Extract citations so the user knows where the info came from
+                thought_log += f"\n• Customer Agent finished generating answer."
+
+                table.put_item(
+                    Item={
+                        'id': request_id,
+                        'status': 'COMPLETED',
+                        'error': None,
+                        'display_text': output_text,
+                        'data': {},
+                        'thought_log': thought_log,
+                        'action_code': action_code,
+                        'agent': 'CUSTOMER',
+                        'ttl': int(time.time()) + 60 * 2 # Set TTL to automatically clean up after 2 minutes
+                    }
+                )
+                continue
+            
+            else:
+                thought_log += f"\n• Customer Agent could not recognize the intent of the query."
+                table.put_item(
+                    Item={
+                        'id': request_id,
+                        'status': 'FAILED',
+                        'error': 'Could not recognize the intent of the query',
+                        'display_text': "Sorry, I couldn't understand your request.",
+                        'thought_log': thought_log,
+                        'action_code': action_code,
+                        'agent': 'CUSTOMER',
+                        'ttl': int(time.time()) + 60 * 2 # Set TTL to automatically clean up after 2 minutes
+                    }
+                )
+                continue
+        
+        except Exception as e:
+            print(f"Customer Agent encountered an error: {str(e)}")
+            table.put_item(
+                Item={
+                    'id': request_id,
+                    'status': 'FAILED',
+                    'error': str(e),
+                    'display_text': "Sorry, I encountered a system issue.",
+                    'thought_log': thought_log,
+                    'agent': 'CUSTOMER',
+                    'action_code': 'GENERAL_RESPONSE',
+                    'ttl': int(time.time()) + 60 * 2 # Set TTL to automatically clean up after 2 minutes
                 }
-            }
-
-        else:
-            thought_log += f"\n• Customer Agent could not recognize the intent of the query."
-            return {
-                "statusCode": 400,
-                "message": "Failed: Could not recognize the intent of the query.",
-                "body": {
-                    "agent": "CUSTOMER",
-                    "action": action_code,
-                    "data": [],
-                    "display_text": "I could not understand your request. Please rephrase it or contact support for assistance.",
-                    "thought_log": thought_log
-                }
-            }
-
-    except Exception as e:
-        # If it fails, send an error back that the Supervisor can parse
-        thought_log += f"\n• Customer Agent encountered an error: {str(e)}"
-
-        return {
-            'statusCode': 500,
-            'message': f'Failed: error {str(e)}',
-            'body': {
-                "agent": "CUSTOMER",
-                "action": "NONE",
-                "data": [],
-                "display_text": "Sorry, I couldn't process your request due to a system error. Please try again later or contact support if the issue persists.",
-                "thought_log": thought_log
-            }
-        }
+            )
+            continue
+    
+    return {"status": "processed"}

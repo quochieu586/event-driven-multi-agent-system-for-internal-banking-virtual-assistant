@@ -18,6 +18,7 @@ class CodeStack(Stack):
     customer_agent: _lambda.Function
     it_agent: _lambda.Function
     finance_agent: _lambda.Function
+    dynamodb_handler: _lambda.Function
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -53,8 +54,28 @@ class CodeStack(Stack):
         self.table = dynamodb.Table(
             self, "BankingLogs",
             partition_key=dynamodb.Attribute(name="id", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="timestamp", type=dynamodb.AttributeType.NUMBER),
-            removal_policy=RemovalPolicy.DESTROY # Only for assignments! Deletes data when you delete stack.
+            time_to_live_attribute="ttl",           # Automatically delete items after a certain time
+            removal_policy=RemovalPolicy.DESTROY    # Deletes data when we delete stack.
+        )
+
+        self.dynamodb_handler = _lambda.Function(
+            self, "DynamoDBHandlerFunction",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler="dynamodb_handler.handler",
+            code=_lambda.Code.from_asset("agents"),
+            timeout=Duration.seconds(10),
+            memory_size=256,
+            environment={
+                'TABLE_NAME': self.table.table_name
+            }
+        )
+
+        # grant read/write permissions to the DynamoDB handler so it can be used by the agents
+        self.table.grant_read_write_data(self.dynamodb_handler)
+
+        # create a public URL for the Lambda function (API Gateway)
+        self.dynamodb_handler.add_function_url(
+            auth_type=_lambda.FunctionUrlAuthType.NONE # Publicly accessible for testing
         )
     
     def _create_s3_bucket(self):
@@ -82,7 +103,10 @@ class CodeStack(Stack):
             memory_size=512, # Adjust as needed
             environment={
                 'TABLE_NAME': self.table.table_name, # Pass the table name to the Lambda function
-                'LLM_ARN': LLM_ARN # Pass the LLM ARN
+                'LLM_ARN': LLM_ARN, # Pass the LLM ARN
+                'CUSTOMER_SQS_URL': 'https://sqs.us-east-1.amazonaws.com/725301416092/CustomerQueue',
+                'IT_SQS_URL': 'https://sqs.us-east-1.amazonaws.com/725301416092/ITQueue',
+                'FINANCE_SQS_URL': 'https://sqs.us-east-1.amazonaws.com/725301416092/FinanceQueue'
             }
         )
         
@@ -124,9 +148,13 @@ class CodeStack(Stack):
             environment={
                 'KNOWLEDGE_BASE_ID': 'PZV13QDRMV', # Pass the Knowledge Base ID to the Lambda function
                 'LLM_ARN': LLM_ARN, # Pass the LLM ARN
-                'GOOGLE_APPLICATION_CREDENTIALS': 'wif_credentials.json' # Path to the WIF credentials file in the Lambda environment
+                'GOOGLE_APPLICATION_CREDENTIALS': 'wif_credentials.json', # Path to the WIF credentials file in the Lambda environment
+                'TABLE_NAME': self.table.table_name, # Pass the table name to the Lambda function
+                'SPREADSHEET_ID': '1ONF1oTXfPhY3JXVRbmvi934d2eOXeZQq3cjbx7-Rw-I' # Pass the Spreadsheet ID for Google Sheets interactions
             }
         )
+
+        self.table.grant_read_write_data(self.customer_agent)
 
         # give the lambda permissions to talk to Bedrock
         self.customer_agent.add_to_role_policy(iam.PolicyStatement(
@@ -161,9 +189,12 @@ class CodeStack(Stack):
             memory_size=256, # Adjust as needed
             environment={
                 'KNOWLEDGE_BASE_ID': 'D8QZ41O0YM', # Pass the Knowledge Base ID to the Lambda function
-                'LLM_ARN': LLM_ARN # Pass the LLM ARN
+                'LLM_ARN': LLM_ARN, # Pass the LLM ARN
+                'TABLE_NAME': self.table.table_name, # Pass the table name to the Lambda function
             }
         )
+
+        self.table.grant_read_write_data(self.it_agent)
 
         # give the lambda permissions to talk to Bedrock
         self.it_agent.add_to_role_policy(iam.PolicyStatement(
@@ -197,10 +228,13 @@ class CodeStack(Stack):
             timeout=Duration.seconds(10), # Adjust as needed
             memory_size=256, # Adjust as needed
             environment={
-                'KNOWLEDGE_BASE_ID': '02HODSHBCN', # Pass the Knowledge Base ID to the Lambda function
-                'LLM_ARN': LLM_ARN # Pass the LLM ARN
+                'KNOWLEDGE_BASE_ID': '02HODSHBCN',      # Pass the Knowledge Base ID to the Lambda function
+                'LLM_ARN': LLM_ARN,                     # Pass the LLM ARN
+                'TABLE_NAME': self.table.table_name,    # Pass the table name to the Lambda function
             }
         )
+
+        self.table.grant_read_write_data(self.finance_agent)
 
         # give the lambda permissions to talk to Bedrock
         self.finance_agent.add_to_role_policy(iam.PolicyStatement(

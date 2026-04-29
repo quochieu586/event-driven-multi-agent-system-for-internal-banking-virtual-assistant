@@ -1,16 +1,21 @@
+import uuid
 import boto3
 import json
 import os
+import time
 
 # Initialize the Bedrock Agent Runtime client
 bedrock_runtime = boto3.client('bedrock-runtime')
 lambda_client = boto3.client('lambda')
+dynamodb = boto3.resource('dynamodb')
+sqs = boto3.client('sqs')
 
 LLM_ARN = os.getenv("LLM_ARN", "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0") # Or your hardcoded ARN
-AGENT_MAP = {
-        "CUSTOMER": os.environ.get('CUSTOMER_AGENT_ARN'),
-        "FINANCE": os.environ.get('FINANCE_AGENT_ARN'),
-        "IT": os.environ.get('IT_AGENT_ARN')
+TABLE_NAME = os.environ.get("TABLE_NAME") # Or your hardcoded table name
+AGENT_QUEUE_MAP = {
+        "CUSTOMER": os.environ.get('CUSTOMER_SQS_URL'),
+        "FINANCE": os.environ.get('FINANCE_SQS_URL'),
+        "IT": os.environ.get('IT_SQS_URL')
     }
 
 def get_prompt(user_query):
@@ -101,6 +106,7 @@ def get_intent(user_query):
         return "OTHERS"
 
 def handler(event, context):
+    table = dynamodb.Table(TABLE_NAME)
     query_params = event.get('queryStringParameters', {})
     user_query = query_params.get('q', '').strip()
     thought_log = ""
@@ -110,13 +116,11 @@ def handler(event, context):
         return {
             "statusCode": 400,
             "message": "Failed: No query provided",
-            "body": {
-                "agent": None,
-                "action": "GENERAL_RESPONSE",
-                "data": {},
-                "display_text": "Sorry, I can't get your question. This may be a system issue. Please try again later or contact support if the issue persists.",
-                "thought_log": thought_log
-            }
+            "body": json.dumps({
+                "status": "COMPLETED",
+                "thought_log": thought_log,
+                "display_text": "Sorry, I can't get your question. This may be a system issue. Please try again later or contact support if the issue persists."
+            })
         }
 
     # 1. Identify intent
@@ -124,29 +128,48 @@ def handler(event, context):
     intent = get_intent(user_query)
     thought_log += f"\n• Supervisor determined the intent to be: {intent}"
 
-    agent_map = {
-        "CUSTOMER": os.environ.get('CUSTOMER_AGENT_ARN'),
-        "FINANCE": os.environ.get('FINANCE_AGENT_ARN'),
-        "IT": os.environ.get('IT_AGENT_ARN')
-    }
 
     # 2. Routing Logic
-    if intent in agent_map:
+    if intent in AGENT_QUEUE_MAP:
+        # Generate a unique request ID for tracking
+        request_id = str(uuid.uuid4())
+
         thought_log += f"\n• Supervisor is routing the query to the {intent} Agent..."
-        target_arn = agent_map[intent]
-        
-        # Invoke specialized agent
-        response = lambda_client.invoke(
-            FunctionName=target_arn,
-            InvocationType='RequestResponse',
-            Payload=json.dumps({"queryStringParameters": {"q": user_query, "thought_log": thought_log}})
+        queue_url = AGENT_QUEUE_MAP[intent]
+
+        # Update DynamoDB with initial status
+        table.put_item(
+            Item={
+                'id': request_id,
+                'status': 'PROCESSING',
+                'display_text': None,
+                'action_code': None,
+                'agent': intent,
+                'ttl': int(time.time()) + 60 * 5 # Set TTL to automatically clean up after 5 minutes
+            }
         )
 
-        # 3. CRITICAL: "Drain" the stream and parse it
-        response_payload = json.loads(response['Payload'].read().decode('utf-8'))
+        # Send the message to the appropriate SQS queue
+        sqs.send_message(
+            QueueUrl=queue_url,
+            MessageBody=json.dumps({
+                "request_id": request_id,
+                "q": user_query,
+            })
+        )
 
         # 4. Return the actual data back to the User/FE
-        return response_payload
+        return {
+            "statusCode": 200,
+            "message": "Success",
+            "body": json.dumps({
+                "request_id": request_id,
+                "status": "PROCESSING",
+                "thought_log": thought_log,
+                "agent": intent,
+                "message": f'Task routed to {intent} department.'
+            })
+        }
 
     # 3. Handle non-agent intents (General/Others)
     else:
@@ -161,11 +184,9 @@ def handler(event, context):
         return {
             'statusCode': 200,
             'message': 'Success',
-            'body': {
-                'agent': None,
-                'action': 'GENERAL_RESPONSE',
-                'data': {},
+            'body': json.dumps({
+                'status': 'COMPLETED',
                 'display_text': answer,
-                'thought_log': thought_log
-            }
+                'thought_log': thought_log,
+            })
         }

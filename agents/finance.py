@@ -1,66 +1,99 @@
 import boto3
 import json
 import os
+import time
 
 # Initialize the Bedrock Agent Runtime client
 bedrock_agent_runtime = boto3.client('bedrock-agent-runtime')
+dynamodb = boto3.resource('dynamodb')
+
 FINANCE_KB_ID = os.environ.get("KNOWLEDGE_BASE_ID") # Or your hardcoded ID
 LLM_ARN = os.environ.get("LLM_ARN") # Or your hardcoded ARN
+TABLE_NAME = os.environ.get("TABLE_NAME") # Or your hardcoded table name
 
 def handler(event, context):
-    # 1. Get the question from Streamlit
-    query_params = event.get('queryStringParameters', {})
-    user_query = query_params.get('q', 'What is the sme limit?')
-    thought_log = query_params.get('thought_log', '')  # This is a JSON string of the thought log
+    table = dynamodb.Table(TABLE_NAME)
+    thought_log = ""
 
-    thought_log += "\n• Finance Agent is executing the query..."
+    # 1. SQS sends messages in a "Records" list
+    for record in event['Records']:
+        # Parse the message body sent by the Supervisor
+        try:
+            body = json.loads(record['body'])
+        except Exception as e:
+            print(f"Agent Finance fails to parse the record")
+            continue
+    
+        # We need a RequestID to link the answer back to the user later
+        request_id = body.get('request_id')
+        user_query = body.get('q', None)
 
-    try:
-        # 2. Ask the Knowledge Base
-        # This searches S3 and uses an LLM to generate the answer
-        thought_log += f"\n• Finance Agent is retrieving relevant information..."
 
-        response = bedrock_agent_runtime.retrieve_and_generate(
-            input={'text': user_query},
-            retrieveAndGenerateConfiguration={
-                'type': 'KNOWLEDGE_BASE',
-                'knowledgeBaseConfiguration': {
-                    'knowledgeBaseId': FINANCE_KB_ID,
-                    'modelArn': LLM_ARN
-                }
-            }
-        )
-
-        output_text = response['output']['text']
-        # Extract citations so the user knows where the info came from
-        citations = response.get('citations', [])
-
-        thought_log += f"\n• Finance Agent finished generating answer."
-
-        return {
-                'statusCode': 200,
-                'message': f'Success',
-                'body': {
+        if not user_query:
+            # If for some reason we don't have a query, we should log this and skip processing
+            thought_log += f"\n• Finance Agent received a message without a query. Skipping processing."
+            table.put_item(
+                Item={
+                    'id': request_id,
+                    'status': 'FAILED',
+                    'action_code': 'GENERAL_RESPONSE',
                     'agent': 'FINANCE',
-                    'action': 'KNOWLEDGE_QUERY',
-                    'data': {},
-                    'display_text': output_text,
-                    'thought_log': thought_log
+                    'error': 'No query provided in the message',
+                    'display_text': "Sorry, I can't receive your query.",
+                    'thought_log': thought_log,
+                    'ttl': int(time.time()) + 60 * 2 # Set TTL to automatically clean up after 2 minutes
                 }
-            }
+            )
+            continue
 
-    except Exception as e:
-        # If it fails, send an error back that the Supervisor can parse
-        thought_log += f"\n• Finance Agent encountered an error: {str(e)}"
+        thought_log += "\n• Finance Agent is executing the query..."
 
-        return {
-            'statusCode': 500,
-            'message': f'Failed: Error {str(e)}',
-            'body': {
-                'agent': 'FINANCE',
-                'action': 'KNOWLEDGE_QUERY',
-                'data': {},
-                'display_text': "Sorry, I can't get your question. This may be a system issue. Please try again later or contact support if the issue persists.",
-                'thought_log': thought_log
-            }
-        }
+        try:
+            thought_log += f"\n• Finance Agent is retrieving relevant information..."
+
+            # 2. Ask the Knowledge Base (Same Bedrock logic)
+            response = bedrock_agent_runtime.retrieve_and_generate(
+                input={'text': user_query},
+                retrieveAndGenerateConfiguration={
+                    'type': 'KNOWLEDGE_BASE',
+                    'knowledgeBaseConfiguration': {
+                        'knowledgeBaseId': FINANCE_KB_ID,
+                        'modelArn': LLM_ARN
+                    }
+                }
+            )
+
+            output_text = response['output']['text']
+            thought_log += f"\n• Finance Agent finished generating answer."
+
+            # 3. Instead of returning, we WRITE to DynamoDB
+            table.put_item(
+                Item={
+                    'id': request_id,
+                    'status': 'COMPLETED',
+                    'agent': 'FINANCE',
+                    'display_text': output_text,
+                    'thought_log': thought_log,
+                    'action_code': 'KNOWLEDGE_QUERY',
+                    'ttl': int(time.time()) + 60 * 2 # Set TTL to automatically clean up after 2 minutes
+                }
+            )
+
+        except Exception as e:
+            thought_log += f"\n• Finance Agent encountered an error: {str(e)}"
+            # Record the failure so the user isn't stuck "Waiting" forever
+            table.put_item(
+                Item={
+                    'id': request_id,
+                    'status': 'FAILED',
+                    'agent': 'FINANCE',
+                    'action_code': 'GENERAL_RESPONSE',
+                    'error': str(e),
+                    'display_text': "Sorry, I encountered a system issue.",
+                    'thought_log': thought_log,
+                    'ttl': int(time.time()) + 60 * 2 # Set TTL to automatically clean up after 2 minutes
+                }
+            )
+            
+    # SQS triggers require no return value to "succeed"
+    return {"status": "processed"}
